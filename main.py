@@ -2,21 +2,22 @@ import argparse
 import os
 import random
 import numpy as np
-from scipy.ndimage.measurements import label
 
 import torch
-import torch.nn as nn
 import torch.nn.parallel
 import torch.backends.cudnn as cudnn
-import torch.optim as optim
 import torch.utils.data
 import torch.nn.functional as F
+from torch.autograd import Variable
+
 import torchvision.datasets as dset
 import torchvision.transforms as transforms
 import torchvision.utils as vutils
-from torch.autograd import Variable
+import torchvision.models as models
 
-from pretrained_models_pytorch import pretrainedmodels
+model_names = sorted(name for name in models.__dict__
+    if name.islower() and not name.startswith("__")
+    and callable(models.__dict__[name]))
 
 from utils import ToRange255, ToSpaceBGR, \
                   init_patch_square, progress_bar, submatrix
@@ -27,10 +28,10 @@ parser.add_argument('--epochs', type=int, default=20, help='number of epochs to 
 parser.add_argument('--cuda', action='store_true', help='enables cuda')
 parser.add_argument('--gpu', type=int, default=0)
 
-parser.add_argument('--target', type=int, default=None, help='The target class: 859 == toaster')
+parser.add_argument('--target', type=int, default=None, help='')
 parser.add_argument('--n-classes', type=int, default=1000, help='')
 
-parser.add_argument('--iter', type=int, default=256, help='Iterations to find adversarial example.')
+parser.add_argument('--iter', type=int, default=500, help='Iterations to find adversarial example.')
 
 parser.add_argument('--data', type=str, required=True, help='Input images diretory.')
 
@@ -46,7 +47,8 @@ parser.add_argument('--image-size', type=int, default=299, help='the height / wi
 
 parser.add_argument('--plot-all', action='store_true', help='plot all successful adversarial images')
 
-parser.add_argument('--netClassifier', default='inceptionv3', help="The target classifier")
+parser.add_argument('--netClassifier', default='inception_v3', 
+                    choices=model_names, help="The target classifier")
 
 parser.add_argument('--outf', default='./logs', help='folder to output images and model checkpoints')
 parser.add_argument('--manualSeed', type=int, default=1338, help='manual seed')
@@ -75,6 +77,7 @@ if torch.cuda.is_available() and not opt.cuda:
     print("WARNING: You have a CUDA device, so you should probably run with --cuda")
 
 target = opt.target
+n_classes = opt.n_classes
 patch_type = opt.patch_type
 patch_size = opt.patch_size
 image_size = opt.image_size
@@ -88,7 +91,8 @@ if opt.y_min > opt.y_max:
 
 
 print("=> creating model ")
-netClassifier = pretrainedmodels.__dict__[opt.netClassifier](num_classes=opt.n_classes, pretrained='imagenet')
+netClassifier = models.__dict__[opt.netClassifier](pretrained=True) # num_classes = 1000 for imagenet
+    # pretrainedmodels.__dict__[opt.netClassifier](num_classes=opt.n_classes, pretrained='imagenet')
 if opt.cuda:
     netClassifier.cuda()
 
@@ -121,8 +125,14 @@ def main():
     for batch_idx, (data, labels) in enumerate(image_loader):
         if opt.cuda:
             data = data.cuda()
-            labels = label.cuda()
+            labels = labels.cuda()
         data, labels = Variable(data), Variable(labels)
+
+        if target is None:
+           targets = torch.randint_like(n_classes, labels) 
+        else:
+            targets = target * torch.ones_like(labels)
+
 
         prediction = netClassifier(data)
 
@@ -135,7 +145,7 @@ def main():
         data_shape = tuple(data.data.shape)
         patch, mask = init_patch_square(data_shape, opt.x_min, opt.x_max, opt.y_min, opt.y_max)
 
-        adv_x, mask, patch = attack(data, patch, mask)
+        adv_x, mask, patch = attack(data, patch, mask, labels, targets)
 
         adv_label = netClassifier(adv_x).data.max(1)[1][0]
         ori_label = labels.data[0]
