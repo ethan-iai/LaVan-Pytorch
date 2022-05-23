@@ -172,12 +172,15 @@ def init_patch_square(data_shape, h_min, h_max, w_min, w_max):
     n, c, h, w = data_shape
 
     # get dummy image 
-    mask = torch.zeros_like(data_shape)
+    patch = torch.zeros(data_shape)
+    mask = torch.zeros(data_shape)
 
     mask[:, :, h_min : h_max, w_min : w_max] = 1
 
-    patch = np.random.uniform(0.0, 1.0, (n, c, h_max - h_min, w_max - w_min))
-    patch = torch.from_numpy(patch)
+    _patch = np.random.uniform(0.0, 1.0, (n, c, h_max - h_min, w_max - w_min))
+    _patch = torch.from_numpy(_patch)
+
+    patch[:, : , h_min: h_max, w_min: w_max] = _patch
 
     return patch, mask
 

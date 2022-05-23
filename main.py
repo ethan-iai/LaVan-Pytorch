@@ -23,7 +23,7 @@ from utils import ToRange255, ToSpaceBGR, \
                   init_patch_square, progress_bar, submatrix
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--workers', type=int, help='number of data loading workers', default=2)
+parser.add_argument('--workers', type=int, help='number of data loading workers', default=0)
 parser.add_argument('--epochs', type=int, default=20, help='number of epochs to train for')
 parser.add_argument('--cuda', action='store_true', help='enables cuda')
 parser.add_argument('--gpu', type=int, default=0)
@@ -45,7 +45,7 @@ parser.add_argument('--epsilon', type=float, default=5, help='')
 
 parser.add_argument('--image-size', type=int, default=299, help='the height / width of the input image to network')
 
-parser.add_argument('--plot-all', action='store_true', help='plot all successful adversarial images')
+parser.add_argument('--plot', action='store_true', help='plot all successful adversarial images')
 
 parser.add_argument('--netClassifier', default='inception_v3', 
                     choices=model_names, help="The target classifier")
@@ -71,17 +71,17 @@ if opt.cuda:
     torch.cuda.manual_seed_all(opt.manualSeed)
     torch.cuda.set_device(opt.gpu)
 
-cudnn.benchmark = True
+# cudnn.benchmark = True
 
 if torch.cuda.is_available() and not opt.cuda:
     print("WARNING: You have a CUDA device, so you should probably run with --cuda")
 
 target = opt.target
 n_classes = opt.n_classes
-patch_type = opt.patch_type
-patch_size = opt.patch_size
+# patch_type = opt.patch_type
+# patch_size = opt.patch_size
 image_size = opt.image_size
-plot_all = opt.plot_all 
+plot = opt.plot 
 eps = opt.epsilon
 
 if opt.x_min > opt.x_max:
@@ -90,7 +90,7 @@ if opt.y_min > opt.y_max:
     raise ValueError("y_min > y_max")
 
 
-print("=> creating model ")
+print("==> creating model ")
 netClassifier = models.__dict__[opt.netClassifier](pretrained=True) # num_classes = 1000 for imagenet
     # pretrainedmodels.__dict__[opt.netClassifier](num_classes=opt.n_classes, pretrained='imagenet')
 if opt.cuda:
@@ -98,24 +98,24 @@ if opt.cuda:
 
 
 print('==> Preparing data..')
-normalize = transforms.Normalize(mean=netClassifier.mean,
-                                 std=netClassifier.std)
+mean, std = np.array([0.0, 0.0, 0.0]), np.array([0.5, 0.5, 0.5]) # TODO: set the dataset's mean and std manually
+normalize = transforms.Normalize(mean, std)     
 
 image_loader = torch.utils.data.DataLoader(
     dset.ImageFolder(opt.data, transforms.Compose([
-        transforms.Scale(round(max(netClassifier.input_size)*1.050)),
-        transforms.CenterCrop(max(netClassifier.input_size)),
+        transforms.Resize(round(image_size*1.050)),
+        transforms.CenterCrop(image_size),
         transforms.ToTensor(),
-        ToSpaceBGR(netClassifier.input_space=='BGR'),
-        ToRange255(max(netClassifier.input_range)==255),
+        # ToSpaceBGR(netClassifier.input_space=='BGR'),         # TODO: set whether need to convert to space BGR manually
+        # ToRange255(max(netClassifier.input_range)==255),      # TODO: set whether need to convert to (0, 255) manually
         normalize,
     ])),
     batch_size=1, shuffle=False, num_workers=opt.workers, pin_memory=True)
  
 
-min_in, max_in = netClassifier.input_range[0], netClassifier.input_range[1]
+min_in, max_in = 0.0, 1.0
 min_in, max_in = np.array([min_in, min_in, min_in]), np.array([max_in, max_in, max_in])
-mean, std = np.array(netClassifier.mean), np.array(netClassifier.std) 
+
 min_out, max_out = np.min((min_in-mean)/std), np.max((max_in-mean)/std)
 
 def main():
@@ -129,7 +129,7 @@ def main():
         data, labels = Variable(data), Variable(labels)
 
         if target is None:
-           targets = torch.randint_like(n_classes, labels) 
+           targets = torch.randint_like(labels, low=0, high=n_classes) 
         else:
             targets = target * torch.ones_like(labels)
 
@@ -144,6 +144,9 @@ def main():
         
         data_shape = tuple(data.data.shape)
         patch, mask = init_patch_square(data_shape, opt.x_min, opt.x_max, opt.y_min, opt.y_max)
+        if opt.cuda:
+            patch = patch.cuda()
+            mask = mask.cuda()            
 
         adv_x, mask, patch = attack(data, patch, mask, labels, targets)
 
@@ -153,7 +156,7 @@ def main():
         if adv_label == target:
             success += 1
       
-            if plot_all == 1: 
+            if plot: 
                 # plot source image
                 vutils.save_image(data.data, "./%s/%d_%d_original.png" %(opt.outf, batch_idx, ori_label), normalize=True)
                 
@@ -161,13 +164,13 @@ def main():
                 vutils.save_image(adv_x.data, "./%s/%d_%d_adversarial.png" %(opt.outf, batch_idx, adv_label), normalize=True)
  
         masked_patch = torch.mul(mask, patch)
-        patch = masked_patch.data.cpu().numpy()
-        new_patch = np.zeros_like(patch)
-        for i in range(new_patch.shape[0]): 
-            for j in range(new_patch.shape[1]): 
-                new_patch[i][j] = submatrix(patch[i][j])
+        # patch = masked_patch.data.cpu().numpy()
+        # new_patch = np.zeros_like(patch)
+        # for i in range(new_patch.shape[0]): 
+        #     for j in range(new_patch.shape[1]): 
+        #         new_patch[i][j] = submatrix(patch[i][j])
  
-        patch = new_patch
+        patch = masked_patch
 
         # log to file  
         progress_bar(batch_idx, len(image_loader), "Train Patch Success: {:.3f}".format(success/total))
@@ -179,16 +182,16 @@ def attack(x, patch, mask, source, target):
     netClassifier.eval()
 
     adv_x = torch.mul((1-mask),x) + torch.mul(mask,patch)
-    src_one_hot = F.one_hot(source).cuda()
-    tar_one_hot = F.one_hot(target).cuda()
+    # src_one_hot = F.one_hot(source).cuda()
+    # tar_one_hot = F.one_hot(target).cuda()
     
     for _ in range(1, opt.iter + 1):
         
         adv_x = Variable(adv_x.data, requires_grad=True)
-        adv_out = netClassifier(adv_out)
+        adv_out = netClassifier(adv_x)
 
-        loss = F.cross_entropy(adv_out, tar_one_hot) -\
-               F.cross_entropy(adv_out, src_one_hot)
+        loss = F.cross_entropy(adv_out, source) -\
+               F.cross_entropy(adv_out, target)
 
         loss.backward()
 
@@ -205,5 +208,5 @@ def attack(x, patch, mask, source, target):
 
 
 if __name__ == '__main__':
-    print("===> start attack...")
+    print("==> start attack...")
     main()
